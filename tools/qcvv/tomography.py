@@ -47,11 +47,167 @@ from tools.qi.qi import vectorize, devectorize, outer
 
 
 ###############################################################
+# Tomography preparation and measurement bases
+###############################################################
+
+class TomographyBasis(dict):
+    """
+    """
+    prep_fun = None
+    meas_fun = None
+
+    def add_prep_gate(self, circuit, qreg, op):
+        """
+        """
+        if self.prep_fun is None:
+            pass
+        else:
+            return self.prep_fun(circuit, qreg, op)
+
+    def add_meas_gate(self, circuit, qreg, op):
+        """
+        """
+        if self.meas_fun is None:
+            pass
+        else:
+            return self.meas_fun(circuit, qreg, op)
+
+
+def tomography_basis(basis, prep=None, meas=None):
+    ret = TomographyBasis(basis)
+    ret.prep_fun = prep
+    ret.meas_fun = meas
+    return ret
+
+
+# PAULI BASIS
+
+def __pauli_prep_gates(circuit, qreg, op):
+    """
+    Add state preparation gates to a circuit.
+    """
+    p, s = op
+    assert(p in ['X', 'Y', 'Z'])
+    if p == "X":
+        if s == 1:
+            circuit.u2(np.pi, np.pi, qreg)  # H.X
+        else:
+            circuit.u2(0., np.pi, qreg)  # H
+    elif p == "Y":
+        if s == 1:
+            circuit.u2(-0.5 * np.pi, np.pi, qreg)  # S.H.X
+        else:
+            circuit.u2(0.5 * np.pi, np.pi, qreg)  # S.H
+    elif p == "Z" and s == 1:
+        circuit.u3(np.pi, 0., np.pi, qreg)  # X
+
+
+def __pauli_meas_gates(circuit, qreg,  op):
+    """
+    Add state measurement gates to a circuit.
+    """
+    assert(op in ['X', 'Y', 'Z'])
+    if op == "X":
+        circuit.u2(0., np.pi, qreg)  # H
+    elif op == "Y":
+        circuit.u2(0., 0.5 * np.pi, qreg)  # H.S^*
+
+
+__PAULI_BASIS_OPS = {'X': [np.array([[0.5, 0.5],
+                                    [0.5, 0.5]]),
+                           np.array([[0.5, -0.5],
+                                    [-0.5, 0.5]])],
+                     'Y': [np.array([[0.5, -0.5j],
+                                    [0.5j, 0.5]]),
+                           np.array([[0.5, 0.5j],
+                                    [-0.5j, 0.5]])],
+                     'Z': [np.array([[1, 0],
+                                    [0, 0]]),
+                           np.array([[0, 0],
+                                    [0, 1]])]}
+
+
+# Create the actual basis
+__PAULI_BASIS = tomography_basis(__PAULI_BASIS_OPS,
+                                 prep=__pauli_prep_gates,
+                                 meas=__pauli_meas_gates)
+
+
+# SIC-POVM BASIS
+def __sic_prep_gates(circuit, qreg, op):
+    """
+    Add state preparation gates to a circuit.
+    """
+    p, s = op
+    assert(p == 'S')
+    if p == "S":
+        theta = -2*np.arctan(np.sqrt(2))
+        if s == 1:
+            circuit.u3(theta, np.pi, 0.0, qreg)
+        elif s == 2:
+            circuit.u3(theta, np.pi/3, 0.0, qreg)
+        elif s == 3:
+            circuit.u3(theta, -np.pi/3, 0.0, qreg)
+
+
+__SIC_BASIS_OPS = {
+    'S': [
+        np.array([[1, 0],
+                  [0, 0]]),
+        np.array([[1, np.sqrt(2)],
+                 [np.sqrt(2), 2]])/3,
+        np.array([[1, np.exp(np.pi * 2j / 3) * np.sqrt(2)],
+                  [np.exp(-np.pi * 2j / 3) * np.sqrt(2), 2]])/3,
+        np.array([[1, np.exp(-np.pi * 2j / 3) * np.sqrt(2)],
+                  [np.exp(np.pi * 2j / 3) * np.sqrt(2), 2]])/3
+    ]}
+
+
+__SIC_BASIS = tomography_basis(__SIC_BASIS_OPS, prep=__sic_prep_gates)
+
+
+# Default Pauli basis
+# This corresponds to measurements in the X, Y, Z basis where
+# Outcomes 0,1 are the +1,-1 eigenstates respectively.
+# State preparation is also done in the +1 and -1 eigenstates.
+
+"""
+__PAULI_BASIS = {'X': [np.array([[0.5, 0.5],
+                                   [0.5, 0.5]]),
+                         np.array([[0.5, -0.5],
+                                   [-0.5, 0.5]])],
+                   'Y': [np.array([[0.5, -0.5j],
+                                   [0.5j, 0.5]]),
+                         np.array([[0.5, 0.5j],
+                                   [-0.5j, 0.5]])],
+                   'Z': [np.array([[1, 0],
+                                   [0, 0]]),
+                         np.array([[0, 0],
+                                   [0, 1]])]}
+
+# SIC-POVM BASIS
+# The outcomes are 0,1,2,3 corresponding to four
+# symmetric informationally complete states.
+__SIC_BASIS = {
+    'S': [
+        np.array([[1, 0],
+                  [0, 0]]),
+        np.array([[1, np.sqrt(2)],
+                 [np.sqrt(2), 2]])/3,
+        np.array([[1, np.exp(np.pi * 2j / 3) * np.sqrt(2)],
+                  [np.exp(-np.pi * 2j / 3) * np.sqrt(2), 2]])/3,
+        np.array([[1, np.exp(-np.pi * 2j / 3) * np.sqrt(2)],
+                  [np.exp(np.pi * 2j / 3) * np.sqrt(2), 2]])/3
+    ]}
+"""
+
+
+###############################################################
 # Tomography circuit generation
 ###############################################################
 
 def build_state_tomography_circuits(Q_program, name, qubits, qreg, creg,
-                                    silent=False):
+                                    meas_basis=None, silent=False):
     """
     Add state tomography measurement circuits to a QuantumProgram.
 
@@ -75,14 +231,20 @@ def build_state_tomography_circuits(Q_program, name, qubits, qreg, creg,
         A list of names of the added quantum state tomography circuits.
         Example: ['circ_measX0', 'circ_measY0', 'circ_measZ0']
     """
+    if meas_basis is None:
+        meas_basis = __PAULI_BASIS
+    else:
+        print('Warning: only Pauli basis measurements are implemented')
 
-    labels = __add_meas_circuits(Q_program, name, qubits, qreg, creg)
+    labels = __add_meas_circuits(Q_program, name, qubits, qreg, creg,
+                                 basis=meas_basis)
     if not silent:
         print('>> created state tomography circuits for "%s"' % name)
     return labels
 
 
 def build_process_tomography_circuits(Q_program, name, qubits, qreg, creg,
+                                      prep_basis=None, meas_basis=None,
                                       silent=False):
     """
     Add process tomography measurement circuits to a QuantumProgram.
@@ -118,11 +280,23 @@ def build_process_tomography_circuits(Q_program, name, qubits, qreg, creg,
     """
 
     # add preparation circuits
-    preps = __add_prep_circuits(Q_program, name, qubits, qreg, creg)
+    if prep_basis is None or prep_basis == 'sic':
+        prep_basis = __SIC_BASIS
+    elif prep_basis in ['pauli', 'overcomplete']:
+        prep_basis = __PAULI_BASIS
+    else:
+        print('Warning: only SIC and Pauli basis preps are implemented')
+    preps = __add_prep_circuits(Q_program, name, qubits, qreg, creg,
+                                basis=prep_basis)
     # add measurement circuits for each prep circuit
+    if meas_basis is None:
+        meas_basis = __PAULI_BASIS
+    else:
+        print('Warning: only Pauli basis measurements are implemented')
     labels = []
     for circ in preps:
-        labels += __add_meas_circuits(Q_program, circ, qubits, qreg, creg)
+        labels += __add_meas_circuits(Q_program, circ, qubits, qreg, creg,
+                                      basis=meas_basis)
         # delete temp prep output
         del Q_program._QuantumProgram__quantum_program[circ]
     if not silent:
@@ -130,7 +304,7 @@ def build_process_tomography_circuits(Q_program, name, qubits, qreg, creg,
     return labels
 
 
-def __tomo_dicts(qubits, basis=None, states=False):
+def __tomo_dicts(qubits, basis, states=False):
     """Helper function.
 
     Build a dictionary assigning a basis element to a qubit.
@@ -148,8 +322,8 @@ def __tomo_dicts(qubits, basis=None, states=False):
     if isinstance(qubits, int):
         qubits = [qubits]
 
-    if basis is None:
-        basis = __DEFAULT_BASIS
+    # if basis is None:
+    #    basis = __PAULI_BASIS
 
     if states:
         ns = len(list(basis.values())[0])
@@ -160,7 +334,7 @@ def __tomo_dicts(qubits, basis=None, states=False):
     return [dict(zip(qubits, b)) for b in product(lst, repeat=len(qubits))]
 
 
-def __add_meas_circuits(Q_program, name, qubits, qreg, creg):
+def __add_meas_circuits(Q_program, name, qubits, qreg, creg, basis):
     """
     Add measurement circuits to a quantum program.
 
@@ -172,21 +346,18 @@ def __add_meas_circuits(Q_program, name, qubits, qreg, creg):
 
     labels = []
 
-    for dic in __tomo_dicts(qubits):
+    for dic in __tomo_dicts(qubits, basis):
 
         # Construct meas circuit name
-        label = '_meas'
+        label = '_meas_'
         for qubit, op in dic.items():
-            label += op + str(qubit)
+            label += '%s[%d]' % (op, qubit)
         circuit = Q_program.create_circuit(label, [qreg], [creg])
 
         # add gates to circuit
         for qubit, op in dic.items():
             circuit.barrier(qreg[qubit])
-            if op == "X":
-                circuit.u2(0., np.pi, qreg[qubit])  # H
-            elif op == "Y":
-                circuit.u2(0., 0.5 * np.pi, qreg[qubit])  # H.S^*
+            basis.add_meas_gate(circuit, qreg[qubit], op)
             circuit.measure(qreg[qubit], creg[qubit])
         # add circuit to QuantumProgram
         Q_program.add_circuit(name+label, orig + circuit)
@@ -198,26 +369,7 @@ def __add_meas_circuits(Q_program, name, qubits, qreg, creg):
     return labels
 
 
-def __add_prep_gates(circuit, qreg, qubit, op):
-    """
-    Add state preparation gates to a circuit.
-    """
-    p, s = op
-    if p == "X":
-        if s == 1:
-            circuit.u2(np.pi, np.pi, qreg[qubit])  # H.X
-        else:
-            circuit.u2(0., np.pi, qreg[qubit])  # H
-    if p == "Y":
-        if s == 1:
-            circuit.u2(-0.5 * np.pi, np.pi, qreg[qubit])  # S.H.X
-        else:
-            circuit.u2(0.5 * np.pi, np.pi, qreg[qubit])  # S.H
-    if p == "Z" and s == 1:
-        circuit.u3(np.pi, 0., np.pi, qreg[qubit])  # X
-
-
-def __add_prep_circuits(Q_program, name, qubits, qreg, creg):
+def __add_prep_circuits(Q_program, name, qubits, qreg, creg, basis):
     """
     Add preparation circuits to a quantum program.
 
@@ -227,18 +379,18 @@ def __add_prep_circuits(Q_program, name, qubits, qreg, creg):
     orig = Q_program.get_circuit(name)
 
     labels = []
-    state = {0: 'p', 1: 'm'}
-    for dic in __tomo_dicts(qubits, states=True):
+    for dic in __tomo_dicts(qubits, basis, states=True):
 
         # make circuit label
-        label = '_prep'
+        label = '_prep_'
         for qubit, op in dic.items():
-            label += op[0] + state[op[1]] + str(qubit)
+            label += '%s%d[%d]' % (op[0], op[1], qubit)
 
         # create circuit and add gates
         circuit = Q_program.create_circuit(label, [qreg], [creg])
         for qubit, op in dic.items():
-            __add_prep_gates(circuit, qreg, qubit, op)
+            basis.add_prep_gate(circuit, qreg[qubit], op)
+            circuit.barrier(qreg[qubit])
 
         # add circuit to QuantumProgram
         Q_program.add_circuit(name + label, circuit + orig)
@@ -254,24 +406,23 @@ def __add_prep_circuits(Q_program, name, qubits, qreg, creg):
 # Tomography circuit labels
 ###############################################################
 
-def __tomo_labels(name, qubits, basis=None, states=False):
+def __tomo_labels(name, qubits, basis, states=False):
     """Helper function.
     """
     labels = []
-    state = {0: 'p', 1: 'm'}
-    for dic in __tomo_dicts(qubits, states=states):
+    for dic in __tomo_dicts(qubits, basis=basis, states=states):
         label = ''
         if states:
             for qubit, op in dic.items():
-                label += op[0] + state[op[1]] + str(qubit)
+                label += '%s%d[%d]' % (op[0], op[1], qubit)
         else:
             for qubit, op in dic.items():
-                label += op[0] + str(qubit)
+                label += '%s[%d]' % (op[0], qubit)
         labels.append(name+label)
     return labels
 
 
-def state_tomography_circuit_names(name, qubits):
+def state_tomography_circuit_names(name, qubits, meas_basis=None):
     """
     Return a list of state tomography circuit names.
 
@@ -286,10 +437,13 @@ def state_tomography_circuit_names(name, qubits):
     Returns:
         A list of circuit names.
     """
-    return __tomo_labels(name + '_meas', qubits)
+    if meas_basis is None:
+        meas_basis = __PAULI_BASIS
+    return __tomo_labels(name + '_meas_', qubits, basis=meas_basis)
 
 
-def process_tomography_circuit_names(name, qubits):
+def process_tomography_circuit_names(name, qubits, prep_basis=None,
+                                     meas_basis=None):
     """
     Return a list of process tomography circuit names.
 
@@ -304,9 +458,17 @@ def process_tomography_circuit_names(name, qubits):
     Returns:
         A list of circuit names.
     """
-    preps = __tomo_labels(name + '_prep', qubits, states=True)
+    # get prep basis
+    if prep_basis is None or prep_basis == 'sic':
+        prep_basis = __SIC_BASIS
+    elif prep_basis in ['pauli', 'overcomplete']:
+        prep_basis = __PAULI_BASIS
+    # get meas basis
+    if meas_basis is None:
+        meas_basis = __PAULI_BASIS
+    preps = __tomo_labels(name + '_prep_', qubits, prep_basis, states=True)
     return reduce(lambda acc, c:
-                  acc + __tomo_labels(c + '_meas', qubits),
+                  acc + __tomo_labels(c + '_meas_', qubits, meas_basis),
                   preps, [])
 
 
@@ -370,27 +532,8 @@ def marginal_counts(counts, meas_qubits):
 
 
 ###############################################################
-# Tomography preparation and measurement bases
+# Getting outcome basis operators
 ###############################################################
-
-# Default Pauli basis
-# This corresponds to measurements in the X, Y, Z basis where
-# Outcomes 0,1 are the +1,-1 eigenstates respectively.
-# State preparation is also done in the +1 and -1 eigenstates.
-
-__DEFAULT_BASIS = {'X': [np.array([[0.5, 0.5],
-                                   [0.5, 0.5]]),
-                         np.array([[0.5, -0.5],
-                                   [-0.5, 0.5]])],
-                   'Y': [np.array([[0.5, -0.5j],
-                                   [0.5j, 0.5]]),
-                         np.array([[0.5, 0.5j],
-                                   [-0.5j, 0.5]])],
-                   'Z': [np.array([[1, 0],
-                                   [0, 0]]),
-                         np.array([[0, 0],
-                                   [0, 1]])]}
-
 
 def __get_meas_basis_ops(tup, basis):
     """
@@ -425,11 +568,11 @@ def __prep_basis(n, basis):
     Return an ordered list of n-qubit preparation projectors.
     """
     # use same function as prep circuits to get order right
-    ordered = __tomo_dicts(range(n), states=True)
+    ordered = __tomo_dicts(range(n), basis=basis, states=True)
     return [__get_prep_basis_op(dic, basis) for dic in ordered]
 
 
-def state_tomography_data(Q_result, name, meas_qubits, basis=None):
+def state_tomography_data(Q_result, name, meas_qubits, meas_basis=None):
     """
     Return a list of state tomography measurement outcomes.
 
@@ -438,7 +581,7 @@ def state_tomography_data(Q_result, name, meas_qubits, basis=None):
             circuits on a backend.
         name (string): The name of the base state preparation circuit.
         meas_qubits (list[int]): a list of the qubit indexes measured.
-        basis (basis dict, optional): the basis used for measurement. Default
+        meas_basis (basis dict, optional): the basis used for measurement. Default
             is the Pauli basis.
 
     Returns:
@@ -453,19 +596,20 @@ def state_tomography_data(Q_result, name, meas_qubits, basis=None):
                           <the projector for the measurement outcomes>
         }
     """
-    if basis is None:
-        basis = __DEFAULT_BASIS
-    labels = state_tomography_circuit_names(name, meas_qubits)
+    if meas_basis is None:
+        meas_basis = __PAULI_BASIS
+    labels = state_tomography_circuit_names(name, meas_qubits,
+                                            meas_basis=meas_basis)
     counts = [marginal_counts(Q_result.get_counts(circ), meas_qubits)
               for circ in labels]
     shots = [sum(c.values()) for c in counts]
-    meas_basis = __meas_basis(len(meas_qubits), basis)
-    ret = [{'counts': i, 'meas_basis': j, 'shots': k}
-           for i, j, k in zip(counts, meas_basis, shots)]
+    cbs_itr = zip(counts, __meas_basis(len(meas_qubits), meas_basis), shots)
+    ret = [{'counts': i, 'meas_basis': j, 'shots': k} for i, j, k in cbs_itr]
     return ret
 
 
-def process_tomography_data(Q_result, name, meas_qubits, basis=None):
+def process_tomography_data(Q_result, name, meas_qubits, prep_basis=None,
+                            meas_basis=None):
     """
     Return a list of process tomography measurement outcomes.
 
@@ -491,18 +635,25 @@ def process_tomography_data(Q_result, name, meas_qubits, basis=None):
                           <the projector for the prepared input state>
         }
     """
-    if basis is None:
-        basis = __DEFAULT_BASIS
+    # Get default bases
+    if prep_basis is None or prep_basis == 'sic':
+        prep_basis = __SIC_BASIS
+    elif prep_basis in ['pauli', 'overcomplete']:
+        prep_basis = __PAULI_BASIS
+    if meas_basis is None:
+        meas_basis = __PAULI_BASIS
+
     n = len(meas_qubits)
-    labels = process_tomography_circuit_names(name, meas_qubits)
+    labels = process_tomography_circuit_names(name, meas_qubits,
+                                              prep_basis=prep_basis,
+                                              meas_basis=meas_basis)
     counts = [marginal_counts(Q_result.get_counts(circ), meas_qubits)
               for circ in labels]
     shots = [sum(c.values()) for c in counts]
-    meas_basis = __meas_basis(n, basis)
-    prep_basis = __prep_basis(n, basis)
 
     ret = [{'meas_basis': meas, 'prep_basis': prep}
-           for prep in prep_basis for meas in meas_basis]
+           for prep in __prep_basis(n, prep_basis) 
+           for meas in __meas_basis(n, meas_basis)]
 
     for dic, cts, sts in zip(ret, counts, shots):
         dic['counts'] = cts
