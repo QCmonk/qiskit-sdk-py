@@ -89,6 +89,11 @@ class TomographyBasis(dict):
         We can then attach these functions to the basis using:
             `BX.prep_fun = BX_prep_fun`
             `BX.meas_fun = BX_meas_fun`.
+
+    Generating function:
+        A generating function `tomography_basis` exists to create bases in a 
+        single step. Using the above example this can be done by:
+        `BX = tomography_basis({'X': [Xp, Xm]}, prep=BX_prep_fun, meas=BX_meas_fun)`
     """
 
     prep_fun = None
@@ -307,8 +312,26 @@ def create_tomography_circuits(qp, name, qreg, creg, tomoset, silent=False):
 
 
 ###############################################################
-# Preformatting count data
+# Get results data
 ###############################################################
+
+def tomography_data(results, name, tomoset):
+    """
+    """
+    labels = tomography_circuit_names(tomoset, name)
+    counts = [marginal_counts(results.get_counts(circ), tomoset['qubits'])
+              for circ in labels]
+    shots = [sum(c.values()) for c in counts]
+    
+    ret = {'meas_basis': tomoset['meas_basis']}
+    if 'prep_basis' in tomoset:
+        ret['prep_basis'] = tomoset['prep_basis']
+
+    ret['data'] = [{'counts': c, 'shots': s, 'circuit': conf}
+                   for c, s, conf in zip(counts, shots, tomoset['circuits'])]
+    
+    return ret
+
 
 def marginal_counts(counts, meas_qubits):
     """
@@ -332,7 +355,7 @@ def marginal_counts(counts, meas_qubits):
     # keys for measured qubits only
     qs = sorted(meas_qubits, reverse=True)
 
-    meas_keys = __counts_keys(len(qs))
+    meas_keys = count_keys(len(qs))
 
     # get regex match strings for suming outcomes of other qubits
     rgx = [reduce(lambda x, y: (key[qs.index(y)] if y in qs else '\\d') + x,
@@ -352,7 +375,7 @@ def marginal_counts(counts, meas_qubits):
     return dict(zip(meas_keys, meas_counts))
 
 
-def __counts_keys(n):
+def count_keys(n):
     """Generate outcome bitstrings for n-qubits.
 
     Args:
@@ -363,52 +386,6 @@ def __counts_keys(n):
         Example: n=2 returns ['00', '01', '10', '11'].
     """
     return [bin(j)[2:].zfill(n) for j in range(2 ** n)]
-
-
-###############################################################
-# Get results data
-###############################################################
-
-def tomography_data(results, name, tomoset):
-    """
-    """
-    labels = tomography_circuit_names(tomoset, name)
-    counts = [marginal_counts(results.get_counts(circ), tomoset['qubits'])
-              for circ in labels]
-    shots = [sum(c.values()) for c in counts]
-    conf = tomoset['circuits']
-
-    meas = [__meas_projector(dic['meas'], tomoset['meas_basis'])
-            for dic in conf]
-    if 'prep' in conf[0]:
-        preps = [__prep_projector(dic['prep'], tomoset['prep_basis'])
-                 for dic in conf]
-        return [{'counts': c, 'shots': s, 'meas_basis': m, 'prep_basis': p}
-                for c, s, m, p in zip(counts, shots, meas, preps)]
-    else:
-        return [{'counts': c, 'shots': s, 'meas_basis': m}
-                for c, s, m in zip(counts, shots, meas)]
-
-
-def __meas_projector(dic, basis):
-    """
-    """
-    itr = it.product(*[basis[dic[i]] for i in sorted(dic.keys(), reverse=True)])
-    ops = []
-    for b in itr:
-        ops.append(reduce(lambda acc, j: np.kron(acc, j), b, [1]))
-    keys = __counts_keys(len(dic))
-    return dict(zip(keys, ops))
-
-
-def __prep_projector(dic, basis):
-    """
-    """
-    ops = [dic[i] for i in sorted(dic.keys(), reverse=True)]
-    ret = [1]
-    for b, i in ops:
-        ret = np.kron(ret, basis[b][i])
-    return ret
 
 
 ###############################################################
@@ -482,18 +459,77 @@ def __get_option(opt, options):
 # Fit Method: Linear Inversion
 ###############################################################
 
-def __tomo_basis_matrix(meas_basis):
-    """Return a matrix of vectorized measurement operators.
+def __leastsq_fit(tomodata, weights=None, trace=None, beta=None):
+    """
+    Reconstruct a state from unconstrained least-squares fitting.
 
     Args:
-        meas_basis(list(array_like)): measurement operators [M_j].
+        data (list[dict]): state or process tomography data.
+        weights (list or array, optional): weights to use for least squares
+            fitting. The default is standard deviation from a binomial
+            distribution.
+        trace (float, optional): trace of returned operator. The default is 1.
+        beta (float >=0, optional): hedge parameter for computing frequencies
+            from zero-count data. The default value is 0.50922.
+
     Returns:
-        The operators S = sum_j |j><M_j|.
+        A numpy array of the reconstructed operator.
     """
-    n = len(meas_basis)
-    d = meas_basis[0].size
-    S = np.array([vectorize(m).conj() for m in meas_basis])
-    return S.reshape(n, d)
+    if trace is None:
+        trace = 1.  # default to unit trace
+
+    data = tomodata['data']
+    ks = data[0]['counts'].keys()
+    K = len(ks)
+    # Get counts and shots
+    ns = np.array([dat['counts'][k] for dat in data for k in ks])
+    shots = np.array([dat['shots'] for dat in data for k in ks])
+    # convert to freqs using beta to hedge against zero counts
+    if beta is None:
+        beta = 0.50922
+    freqs = (ns + beta) / (shots + K * beta)
+
+    # Use standard least squares fitting weights
+    if weights is None:
+        weights = np.sqrt(shots / (freqs * (1 - freqs)))
+
+    # Convert tomography data bases to projectors
+    meas_basis = tomodata['meas_basis']
+    ops_m = []
+    for dic in data:
+        ops_m += __meas_projector(dic['circuit']['meas'], meas_basis)
+
+    if 'prep' in data[0]['circuit']:
+        prep_basis = tomodata['prep_basis']
+        ops_p = []
+        for dic in data:
+            p = __prep_projector(dic['circuit']['prep'], prep_basis)
+            ops_p += [p for k in ks]  # pad for each meas outcome
+        ops = [np.kron(p.T, m) for p, m in zip(ops_p, ops_m)]
+    else:
+        ops = ops_m
+
+    return __tomo_linear_inv(freqs, ops, weights, trace=trace)
+
+
+def __meas_projector(dic, basis):
+    """Returns a list of measurement outcome projectors.
+    """
+    meas_opts = [basis[dic[i]] for i in sorted(dic.keys(), reverse=True)]
+    ops = []
+    for b in it.product(*meas_opts):
+        ops.append(reduce(lambda acc, j: np.kron(acc, j), b, [1]))
+    return ops
+
+
+def __prep_projector(dic, basis):
+    """Returns a state preparation projector.
+    """
+    ops = [dic[i] for i in sorted(dic.keys(), reverse=True)]
+    ret = [1]
+    for b, i in ops:
+        ret = np.kron(ret, basis[b][i])
+    return ret
 
 
 def __tomo_linear_inv(freqs, ops, weights=None, trace=None):
@@ -535,51 +571,6 @@ def __tomo_linear_inv(freqs, ops, weights=None, trace=None):
     if trace is not None:
         ret = trace * ret / np.trace(ret)
     return ret
-
-
-def __leastsq_fit(data, weights=None, trace=None, beta=None):
-    """
-    Reconstruct a state from unconstrained least-squares fitting.
-
-    Args:
-        data (list[dict]): state or process tomography data.
-        weights (list or array, optional): weights to use for least squares
-            fitting. The default is standard deviation from a binomial
-            distribution.
-        trace (float, optional): trace of returned operator. The default is 1.
-        beta (float >=0, optional): hedge parameter for computing frequencies
-            from zero-count data. The default value is 0.50922.
-
-    Returns:
-        A numpy array of the reconstructed operator.
-    """
-    if trace is None:
-        trace = 1.  # default to unit trace
-
-    ks = data[0]['counts'].keys()
-    K = len(ks)
-    # Get counts and shots
-    ns = np.array([dat['counts'][k] for dat in data for k in ks])
-    shots = np.array([dat['shots'] for dat in data for k in ks])
-    # convert to freqs using beta to hedge against zero counts
-    if beta is None:
-        beta = 0.50922
-    freqs = (ns + beta) / (shots + K * beta)
-
-    # Use standard least squares fitting weights
-    if weights is None:
-        weights = np.sqrt(shots / (freqs * (1 - freqs)))
-
-    # Get measurement basis ops
-    if 'prep_basis' in data[0]:
-        # process tomography fit
-        ops = [np.kron(dat['prep_basis'].T, dat['meas_basis'][k])
-               for dat in data for k in ks]
-    else:
-        # state tomography fit
-        ops = [dat['meas_basis'][k] for dat in data for k in ks]
-
-    return __tomo_linear_inv(freqs, ops, weights, trace=trace)
 
 
 ###############################################################
