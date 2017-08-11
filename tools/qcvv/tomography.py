@@ -39,24 +39,62 @@ References:
 """
 
 import numpy as np
+import itertools as it
+import random
 from functools import reduce
 from re import match
-from itertools import product
 
 from tools.qi.qi import vectorize, devectorize, outer
 
 
 ###############################################################
-# Tomography preparation and measurement bases
+# Tomography Bases
 ###############################################################
 
 class TomographyBasis(dict):
     """
+    Dictionary subsclass that includes methods for adding gates to circuits.
+
+    A TomographyBasis is a dictionary where the keys index a measurement
+    and the values are a list of projectors associated to that measurement.
+    It also includes two optional methods `prep_gate` and `meas_gate`:
+        - `prep_gate` adds gates to a circuit to prepare the corresponding
+          basis projector from an inital ground state.
+        - `meas_gate` adds gates to a circuit to transform the default
+          Z-measurement into a measurement in the basis.
+    With the exception of built in bases, these functions do nothing unless
+    they are specified by the user. They may be set by the data members
+    `prep_fun` and `meas_fun`. We illustrate this with an example.
+    
+    Example:
+        A measurement in the Pauli-X basis has two outcomes corresponding to
+        the projectors:
+            `Xp = [[0.5, 0.5], [0.5, 0.5]]`
+            `Zm = [[0.5, -0.5], [-0.5, 0.5]]`
+        We can express this as a basis by
+            `BX = TomographyBasis( {'X': [Xp, Xm]} )`
+        To specifiy the gates to prepare and measure in this basis we :
+            ```
+            def BX_prep_fun(circuit, qreg, op):
+                bas, proj = op
+                if bas == "X":
+                    if proj == 0:
+                        circuit.u2(0., np.pi, qreg)  # apply H
+                    else:  # proj == 1
+                        circuit.u2(np.pi, np.pi, qreg)  # apply H.X
+            def BX_prep_fun(circuit, qreg, op):
+                if op == "X":
+                        circuit.u2(0., np.pi, qreg)  # apply H
+            ```
+        We can then attach these functions to the basis using:
+            `BX.prep_fun = BX_prep_fun`
+            `BX.meas_fun = BX_meas_fun`.
     """
+
     prep_fun = None
     meas_fun = None
 
-    def add_prep_gate(self, circuit, qreg, op):
+    def prep_gate(self, circuit, qreg, op):
         """
         """
         if self.prep_fun is None:
@@ -64,7 +102,7 @@ class TomographyBasis(dict):
         else:
             return self.prep_fun(circuit, qreg, op)
 
-    def add_meas_gate(self, circuit, qreg, op):
+    def meas_gate(self, circuit, qreg, op):
         """
         """
         if self.meas_fun is None:
@@ -81,24 +119,27 @@ def tomography_basis(basis, prep=None, meas=None):
 
 
 # PAULI BASIS
+# This corresponds to measurements in the X, Y, Z basis where
+# Outcomes 0,1 are the +1,-1 eigenstates respectively.
+# State preparation is also done in the +1 and -1 eigenstates.
 
 def __pauli_prep_gates(circuit, qreg, op):
     """
     Add state preparation gates to a circuit.
     """
-    p, s = op
-    assert(p in ['X', 'Y', 'Z'])
-    if p == "X":
-        if s == 1:
+    bas, proj = op
+    assert(bas in ['X', 'Y', 'Z'])
+    if bas == "X":
+        if proj == 1:
             circuit.u2(np.pi, np.pi, qreg)  # H.X
         else:
             circuit.u2(0., np.pi, qreg)  # H
-    elif p == "Y":
-        if s == 1:
+    elif bas == "Y":
+        if proj == 1:
             circuit.u2(-0.5 * np.pi, np.pi, qreg)  # S.H.X
         else:
             circuit.u2(0.5 * np.pi, np.pi, qreg)  # S.H
-    elif p == "Z" and s == 1:
+    elif bas == "Z" and proj == 1:
         circuit.u3(np.pi, 0., np.pi, qreg)  # X
 
 
@@ -128,9 +169,9 @@ __PAULI_BASIS_OPS = {'X': [np.array([[0.5, 0.5],
 
 
 # Create the actual basis
-__PAULI_BASIS = tomography_basis(__PAULI_BASIS_OPS,
-                                 prep=__pauli_prep_gates,
-                                 meas=__pauli_meas_gates)
+PAULI_BASIS = tomography_basis(__PAULI_BASIS_OPS,
+                               prep=__pauli_prep_gates,
+                               meas=__pauli_meas_gates)
 
 
 # SIC-POVM BASIS
@@ -138,15 +179,15 @@ def __sic_prep_gates(circuit, qreg, op):
     """
     Add state preparation gates to a circuit.
     """
-    p, s = op
-    assert(p == 'S')
-    if p == "S":
+    bas, proj = op
+    assert(bas == 'S')
+    if bas == "S":
         theta = -2*np.arctan(np.sqrt(2))
-        if s == 1:
+        if proj == 1:
             circuit.u3(theta, np.pi, 0.0, qreg)
-        elif s == 2:
+        elif proj == 2:
             circuit.u3(theta, np.pi/3, 0.0, qreg)
-        elif s == 3:
+        elif proj == 3:
             circuit.u3(theta, -np.pi/3, 0.0, qreg)
 
 
@@ -163,331 +204,111 @@ __SIC_BASIS_OPS = {
     ]}
 
 
-__SIC_BASIS = tomography_basis(__SIC_BASIS_OPS, prep=__sic_prep_gates)
+SIC_BASIS = tomography_basis(__SIC_BASIS_OPS, prep=__sic_prep_gates)
 
 
-# Default Pauli basis
-# This corresponds to measurements in the X, Y, Z basis where
-# Outcomes 0,1 are the +1,-1 eigenstates respectively.
-# State preparation is also done in the +1 and -1 eigenstates.
+###############################################################
+# Tomography Set and labels
+###############################################################
 
-"""
-__PAULI_BASIS = {'X': [np.array([[0.5, 0.5],
-                                   [0.5, 0.5]]),
-                         np.array([[0.5, -0.5],
-                                   [-0.5, 0.5]])],
-                   'Y': [np.array([[0.5, -0.5j],
-                                   [0.5j, 0.5]]),
-                         np.array([[0.5, 0.5j],
-                                   [-0.5j, 0.5]])],
-                   'Z': [np.array([[1, 0],
-                                   [0, 0]]),
-                         np.array([[0, 0],
-                                   [0, 1]])]}
+def tomography_set(qubits, meas_basis='pauli', prep_basis=None,
+                   samples=None, seed=None):
+    """
+    """
 
-# SIC-POVM BASIS
-# The outcomes are 0,1,2,3 corresponding to four
-# symmetric informationally complete states.
-__SIC_BASIS = {
-    'S': [
-        np.array([[1, 0],
-                  [0, 0]]),
-        np.array([[1, np.sqrt(2)],
-                 [np.sqrt(2), 2]])/3,
-        np.array([[1, np.exp(np.pi * 2j / 3) * np.sqrt(2)],
-                  [np.exp(-np.pi * 2j / 3) * np.sqrt(2), 2]])/3,
-        np.array([[1, np.exp(-np.pi * 2j / 3) * np.sqrt(2)],
-                  [np.exp(np.pi * 2j / 3) * np.sqrt(2), 2]])/3
-    ]}
-"""
+    assert(isinstance(qubits, list))
+    nq = len(qubits)
+
+    if meas_basis == 'pauli':
+        meas_basis = PAULI_BASIS
+
+    if prep_basis == 'pauli':
+        prep_basis = PAULI_BASIS
+    elif prep_basis == 'SIC':
+        prep_basis = SIC_BASIS
+
+    ret = {'qubits': qubits, 'meas_basis': meas_basis}
+
+    # add meas basis configs
+    mlst = meas_basis.keys()
+    meas = [dict(zip(qubits, b)) for b in it.product(mlst, repeat=nq)]
+    ret['circuits'] = [{'meas': m} for m in meas]
+
+    if prep_basis is not None:
+        ret['prep_basis'] = prep_basis
+        ns = len(list(prep_basis.values())[0])
+        plst = [(b, s) for b in prep_basis.keys() for s in range(ns)]
+        ret['circuits'] = [{'prep': dict(zip(qubits, b)), 'meas': dic['meas']} 
+                           for b in it.product(plst, repeat=nq) 
+                           for dic in ret['circuits']]
+
+    if samples is None:
+        return ret
+    else:
+        rng = random.Random(seed)
+        ret['circuits'] = rng.sample(ret['circuits'], samples)
+        return ret
+
+
+def tomography_circuit_names(tomo_set, name=''):
+    """
+    """
+    labels = []
+    for circ in tomo_set['circuits']:
+        label = ''
+        # add prep
+        if 'prep' in circ:
+            label += '_prep_'
+            for qubit, op in circ['prep'].items():
+                label += '%s%d(%d)' % (op[0], op[1], qubit)
+        # add meas
+        label += '_meas_'
+        for qubit, op in circ['meas'].items():
+            label += '%s(%d)' % (op[0], qubit)
+        labels.append(name+label)
+    return labels
 
 
 ###############################################################
 # Tomography circuit generation
 ###############################################################
 
-def build_state_tomography_circuits(Q_program, name, qubits, qreg, creg,
-                                    meas_basis=None, silent=False):
+def create_tomography_circuits(qp, name, qreg, creg, tomoset, silent=False):
     """
-    Add state tomography measurement circuits to a QuantumProgram.
-
-    The quantum program must contain a circuit 'name', which is treated as a
-    state preparation circuit. This function then appends the circuit with a
-    tomographically overcomplete set of measurements in the Pauli basis for
-    each qubit to be measured. For n-qubit tomography this result in 3 ** n
-    measurement circuits being added to the quantum program.
-
-    Args:
-        Q_program (QuantumProgram): A quantum program to store the circuits.
-        name (string): The name of the base circuit to be appended.
-        qubits (list[int]): a list of the qubit indexes of qreg to be measured.
-        qreg (QuantumRegister): the quantum register containing qubits to be
-                                measured.
-        creg (ClassicalRegister): the classical register containing bits to
-                                  store measurement outcomes.
-        silent (bool, optional): hide verbose output.
-
-    Returns:
-        A list of names of the added quantum state tomography circuits.
-        Example: ['circ_measX0', 'circ_measY0', 'circ_measZ0']
     """
-    if meas_basis is None:
-        meas_basis = __PAULI_BASIS
-    else:
-        print('Warning: only Pauli basis measurements are implemented')
+    dics = tomoset['circuits']
+    labels = tomography_circuit_names(tomoset, name)
+    circuit = qp.get_circuit(name)
 
-    labels = __add_meas_circuits(Q_program, name, qubits, qreg, creg,
-                                 basis=meas_basis)
+    for label, conf in zip(labels, dics):
+        tmp = circuit
+        # Add prep circuits
+        if 'prep' in conf:
+            prep = qp.create_circuit('tmp_prep', [qreg], [creg])
+            for q, op in conf['prep'].items():
+                tomoset['prep_basis'].prep_gate(prep, qreg[q], op)
+                prep.barrier(qreg[q])
+            tmp = prep + tmp
+            del qp._QuantumProgram__quantum_program['tmp_prep']
+        # Add measurement circuits
+        meas = qp.create_circuit('tmp_meas', [qreg], [creg])
+        for q, op in conf['meas'].items():
+            meas.barrier(qreg[q])
+            tomoset['meas_basis'].meas_gate(meas, qreg[q], op)
+            meas.measure(qreg[q], creg[q])
+        tmp = tmp + meas
+        del qp._QuantumProgram__quantum_program['tmp_meas']
+        # Add tomography circuit
+        qp.add_circuit(label, tmp)
+
     if not silent:
-        print('>> created state tomography circuits for "%s"' % name)
+        print('>> created tomography circuits for "%s"' % name)
     return labels
-
-
-def build_process_tomography_circuits(Q_program, name, qubits, qreg, creg,
-                                      prep_basis=None, meas_basis=None,
-                                      silent=False):
-    """
-    Add process tomography measurement circuits to a QuantumProgram.
-
-    The quantum program must contain a circuit 'name', which is the circuit
-    that will be reconstructed via tomographic measurements. This function
-    then prepends and appends the circuit with a tomographically overcomplete
-    set of preparations and measurements in the Pauli basis for
-    each qubit to be measured. For n-qubit process tomography this result in
-    (6 ** n) * (3 ** n) circuits being added to the quantum program:
-        - 3 ** n measurements in the Pauli X, Y, Z bases.
-        - 6 ** n preparations in the +1 and -1 eigenstates of X, Y, Z.
-
-    Args:
-        Q_program (QuantumProgram): A quantum program to store the circuits.
-        name (string): The name of the base circuit to be appended.
-        qubits (list[int]): a list of the qubit indexes of qreg to be measured.
-        qreg (QuantumRegister): the quantum register containing qubits to be
-                                measured.
-        creg (ClassicalRegister): the classical register containing bits to
-                                  store measurement outcomes.
-        silent (bool, optional): hide verbose output.
-
-    Returns:
-        A list of names of the added quantum process tomography circuits.
-        Example:
-        ['circ_prepXp0_measX0', 'circ_prepXp0_measY0', 'circ_prepXp0_measZ0',
-         'circ_prepXm0_measX0', 'circ_prepXm0_measY0', 'circ_prepXm0_measZ0',
-         'circ_prepYp0_measX0', 'circ_prepYp0_measY0', 'circ_prepYp0_measZ0',
-         'circ_prepYm0_measX0', 'circ_prepYm0_measY0', 'circ_prepYm0_measZ0',
-         'circ_prepZp0_measX0', 'circ_prepZp0_measY0', 'circ_prepZp0_measZ0',
-         'circ_prepZm0_measX0', 'circ_prepZm0_measY0', 'circ_prepZm0_measZ0']
-    """
-
-    # add preparation circuits
-    if prep_basis is None or prep_basis == 'sic':
-        prep_basis = __SIC_BASIS
-    elif prep_basis in ['pauli', 'overcomplete']:
-        prep_basis = __PAULI_BASIS
-    else:
-        print('Warning: only SIC and Pauli basis preps are implemented')
-    preps = __add_prep_circuits(Q_program, name, qubits, qreg, creg,
-                                basis=prep_basis)
-    # add measurement circuits for each prep circuit
-    if meas_basis is None:
-        meas_basis = __PAULI_BASIS
-    else:
-        print('Warning: only Pauli basis measurements are implemented')
-    labels = []
-    for circ in preps:
-        labels += __add_meas_circuits(Q_program, circ, qubits, qreg, creg,
-                                      basis=meas_basis)
-        # delete temp prep output
-        del Q_program._QuantumProgram__quantum_program[circ]
-    if not silent:
-        print('>> created process tomography circuits for "%s"' % name)
-    return labels
-
-
-def __tomo_dicts(qubits, basis, states=False):
-    """Helper function.
-
-    Build a dictionary assigning a basis element to a qubit.
-
-    Args:
-        qubit (int): the qubit to add
-        tomos (list[dict]): list of tomo_dicts to add to
-        basis (list[str], optional): basis to use. If not specified
-            the default is ['X', 'Y', 'Z']
-
-    Returns:
-        A new list of tomo_dict
-    """
-
-    if isinstance(qubits, int):
-        qubits = [qubits]
-
-    # if basis is None:
-    #    basis = __PAULI_BASIS
-
-    if states:
-        ns = len(list(basis.values())[0])
-        lst = [(b, s) for b in basis.keys() for s in range(ns)]
-    else:
-        lst = basis.keys()
-
-    return [dict(zip(qubits, b)) for b in product(lst, repeat=len(qubits))]
-
-
-def __add_meas_circuits(Q_program, name, qubits, qreg, creg, basis):
-    """
-    Add measurement circuits to a quantum program.
-
-    See: build_state_tomography_circuits.
-         build_process_tomography_circuits.
-    """
-
-    orig = Q_program.get_circuit(name)
-
-    labels = []
-
-    for dic in __tomo_dicts(qubits, basis):
-
-        # Construct meas circuit name
-        label = '_meas_'
-        for qubit, op in dic.items():
-            label += '%s[%d]' % (op, qubit)
-        circuit = Q_program.create_circuit(label, [qreg], [creg])
-
-        # add gates to circuit
-        for qubit, op in dic.items():
-            circuit.barrier(qreg[qubit])
-            basis.add_meas_gate(circuit, qreg[qubit], op)
-            circuit.measure(qreg[qubit], creg[qubit])
-        # add circuit to QuantumProgram
-        Q_program.add_circuit(name+label, orig + circuit)
-        # add label to output
-        labels.append(name+label)
-        # delete temp circuit
-        del Q_program._QuantumProgram__quantum_program[label]
-
-    return labels
-
-
-def __add_prep_circuits(Q_program, name, qubits, qreg, creg, basis):
-    """
-    Add preparation circuits to a quantum program.
-
-    See: build_process_tomography_circuits.
-    """
-
-    orig = Q_program.get_circuit(name)
-
-    labels = []
-    for dic in __tomo_dicts(qubits, basis, states=True):
-
-        # make circuit label
-        label = '_prep_'
-        for qubit, op in dic.items():
-            label += '%s%d[%d]' % (op[0], op[1], qubit)
-
-        # create circuit and add gates
-        circuit = Q_program.create_circuit(label, [qreg], [creg])
-        for qubit, op in dic.items():
-            basis.add_prep_gate(circuit, qreg[qubit], op)
-            circuit.barrier(qreg[qubit])
-
-        # add circuit to QuantumProgram
-        Q_program.add_circuit(name + label, circuit + orig)
-        # add label to output
-        labels += [name+label]
-        # delete temp circuit
-        del Q_program._QuantumProgram__quantum_program[label]
-
-    return labels
-
-
-###############################################################
-# Tomography circuit labels
-###############################################################
-
-def __tomo_labels(name, qubits, basis, states=False):
-    """Helper function.
-    """
-    labels = []
-    for dic in __tomo_dicts(qubits, basis=basis, states=states):
-        label = ''
-        if states:
-            for qubit, op in dic.items():
-                label += '%s%d[%d]' % (op[0], op[1], qubit)
-        else:
-            for qubit, op in dic.items():
-                label += '%s[%d]' % (op[0], qubit)
-        labels.append(name+label)
-    return labels
-
-
-def state_tomography_circuit_names(name, qubits, meas_basis=None):
-    """
-    Return a list of state tomography circuit names.
-
-    This list is the same as that returned by the
-    build_state_tomography_circuits function.
-
-    Args:
-        name (string): the name of the original state preparation
-                       circuit.
-        qubits: (list[int]): the qubits being measured.
-
-    Returns:
-        A list of circuit names.
-    """
-    if meas_basis is None:
-        meas_basis = __PAULI_BASIS
-    return __tomo_labels(name + '_meas_', qubits, basis=meas_basis)
-
-
-def process_tomography_circuit_names(name, qubits, prep_basis=None,
-                                     meas_basis=None):
-    """
-    Return a list of process tomography circuit names.
-
-    This list is the same as that returned by the
-    build_process_tomography_circuits function.
-
-    Args:
-        name (string): the name of the original circuit to be
-                       reconstructed.
-        qubits: (list[int]): the qubits being measured.
-
-    Returns:
-        A list of circuit names.
-    """
-    # get prep basis
-    if prep_basis is None or prep_basis == 'sic':
-        prep_basis = __SIC_BASIS
-    elif prep_basis in ['pauli', 'overcomplete']:
-        prep_basis = __PAULI_BASIS
-    # get meas basis
-    if meas_basis is None:
-        meas_basis = __PAULI_BASIS
-    preps = __tomo_labels(name + '_prep_', qubits, prep_basis, states=True)
-    return reduce(lambda acc, c:
-                  acc + __tomo_labels(c + '_meas_', qubits, meas_basis),
-                  preps, [])
 
 
 ###############################################################
 # Preformatting count data
 ###############################################################
-
-def __counts_keys(n):
-    """Generate outcome bitstrings for n-qubits.
-
-    Args:
-        n (int): the number of qubits.
-
-    Returns:
-        A list of bitstrings ordered as follows:
-        Example: n=2 returns ['00', '01', '10', '11'].
-    """
-    return [bin(j)[2:].zfill(n) for j in range(2 ** n)]
-
 
 def marginal_counts(counts, meas_qubits):
     """
@@ -531,138 +352,134 @@ def marginal_counts(counts, meas_qubits):
     return dict(zip(meas_keys, meas_counts))
 
 
-###############################################################
-# Getting outcome basis operators
-###############################################################
-
-def __get_meas_basis_ops(tup, basis):
-    """
-    Return a n-qubit projector for a given measurement.
-    """
-    # reverse tuple so least significant qubit is to the right
-    return reduce(lambda acc, b: [np.kron(a, j)
-                                  for a in acc for j in basis[b]],
-                  reversed(tup), [1])
-
-
-def __meas_basis(n, basis):
-    """
-    Return an ordered list of n-qubit measurment projectors.
-    """
-    return [dict(zip(__counts_keys(n), __get_meas_basis_ops(key, basis)))
-            for key in product(basis.keys(), repeat=n)]
-
-
-def __get_prep_basis_op(dic, basis):
-    """
-    Return an n-qubit projector for a given prepration.
-    """
-    keys = sorted(dic.keys())  # order qubits [0,1,...]
-    tups = [dic[k] for k in keys]
-    return reduce(lambda acc, b: np.kron(basis[b[0]][b[1]], acc),
-                  tups, [1])
-
-
-def __prep_basis(n, basis):
-    """
-    Return an ordered list of n-qubit preparation projectors.
-    """
-    # use same function as prep circuits to get order right
-    ordered = __tomo_dicts(range(n), basis=basis, states=True)
-    return [__get_prep_basis_op(dic, basis) for dic in ordered]
-
-
-def state_tomography_data(Q_result, name, meas_qubits, meas_basis=None):
-    """
-    Return a list of state tomography measurement outcomes.
+def __counts_keys(n):
+    """Generate outcome bitstrings for n-qubits.
 
     Args:
-        Q_result (Result): Results from execution of a state tomography
-            circuits on a backend.
-        name (string): The name of the base state preparation circuit.
-        meas_qubits (list[int]): a list of the qubit indexes measured.
-        meas_basis (basis dict, optional): the basis used for measurement. Default
-            is the Pauli basis.
+        n (int): the number of qubits.
 
     Returns:
-        A list of dicts for the outcome of each state tomography
-        measurement circuit. The keys of the dictionary are
-        {
-            'counts': dict('str': int),
-                      <the marginal counts for measured qubits>,
-            'shots': int,
-                     <total number of shots for measurement circuit>
-            'meas_basis': dict('str': np.array)
-                          <the projector for the measurement outcomes>
-        }
+        A list of bitstrings ordered as follows:
+        Example: n=2 returns ['00', '01', '10', '11'].
     """
-    if meas_basis is None:
-        meas_basis = __PAULI_BASIS
-    labels = state_tomography_circuit_names(name, meas_qubits,
-                                            meas_basis=meas_basis)
-    counts = [marginal_counts(Q_result.get_counts(circ), meas_qubits)
+    return [bin(j)[2:].zfill(n) for j in range(2 ** n)]
+
+
+###############################################################
+# Get results data
+###############################################################
+
+def tomography_data(results, name, tomoset):
+    """
+    """
+    labels = tomography_circuit_names(tomoset, name)
+    counts = [marginal_counts(results.get_counts(circ), tomoset['qubits'])
               for circ in labels]
     shots = [sum(c.values()) for c in counts]
-    cbs_itr = zip(counts, __meas_basis(len(meas_qubits), meas_basis), shots)
-    ret = [{'counts': i, 'meas_basis': j, 'shots': k} for i, j, k in cbs_itr]
-    return ret
+    conf = tomoset['circuits']
+
+    meas = [__meas_projector(dic['meas'], tomoset['meas_basis'])
+            for dic in conf]
+    if 'prep' in conf[0]:
+        preps = [__prep_projector(dic['prep'], tomoset['prep_basis'])
+                 for dic in conf]
+        return [{'counts': c, 'shots': s, 'meas_basis': m, 'prep_basis': p}
+                for c, s, m, p in zip(counts, shots, meas, preps)]
+    else:
+        return [{'counts': c, 'shots': s, 'meas_basis': m}
+                for c, s, m in zip(counts, shots, meas)]
 
 
-def process_tomography_data(Q_result, name, meas_qubits, prep_basis=None,
-                            meas_basis=None):
+def __meas_projector(dic, basis):
     """
-    Return a list of process tomography measurement outcomes.
-
-    Args:
-        Q_result (Result): Results from execution of a process tomography
-            circuits on a backend.
-        name (string): The name of the circuit being reconstructed.
-        meas_qubits (list[int]): a list of the qubit indexes measured.
-        basis (basis dict, optional): the basis used for measurement. Default
-            is the Pauli basis.
-
-    Returns:
-        A list of dicts for the outcome of each process tomography
-        measurement circuit. The keys of the dictionary are
-        {
-            'counts': dict('str': int),
-                      <the marginal counts for measured qubits>,
-            'shots': int,
-                     <total number of shots for measurement circuit>
-            'meas_basis': dict('str': np.array),
-                          <the projector for the measurement outcomes>
-            'prep_basis': np.array,
-                          <the projector for the prepared input state>
-        }
     """
-    # Get default bases
-    if prep_basis is None or prep_basis == 'sic':
-        prep_basis = __SIC_BASIS
-    elif prep_basis in ['pauli', 'overcomplete']:
-        prep_basis = __PAULI_BASIS
-    if meas_basis is None:
-        meas_basis = __PAULI_BASIS
+    itr = it.product(*[basis[dic[i]] for i in sorted(dic.keys(), reverse=True)])
+    ops = []
+    for b in itr:
+        ops.append(reduce(lambda acc, j: np.kron(acc, j), b, [1]))
+    keys = __counts_keys(len(dic))
+    return dict(zip(keys, ops))
 
-    n = len(meas_qubits)
-    labels = process_tomography_circuit_names(name, meas_qubits,
-                                              prep_basis=prep_basis,
-                                              meas_basis=meas_basis)
-    counts = [marginal_counts(Q_result.get_counts(circ), meas_qubits)
-              for circ in labels]
-    shots = [sum(c.values()) for c in counts]
 
-    ret = [{'meas_basis': meas, 'prep_basis': prep}
-           for prep in __prep_basis(n, prep_basis) 
-           for meas in __meas_basis(n, meas_basis)]
-
-    for dic, cts, sts in zip(ret, counts, shots):
-        dic['counts'] = cts
-        dic['shots'] = sts
+def __prep_projector(dic, basis):
+    """
+    """
+    ops = [dic[i] for i in sorted(dic.keys(), reverse=True)]
+    ret = [1]
+    for b, i in ops:
+        ret = np.kron(ret, basis[b][i])
     return ret
 
 
 ###############################################################
 # Tomographic Reconstruction functions.
+###############################################################
+
+def fit_tomography_data(data, method=None, options=None):
+    """
+    Reconstruct a density matrix or process-matrix from tomography data.
+
+    If the input data is state_tomography_data the returned operator will
+    be a density matrix. If the input data is process_tomography_data the
+    returned operator will be a Choi-matrix in the column-vectorization
+    convention.
+
+    Args:
+        data (dict): process tomography measurement data.
+        method (str, optional): the fitting method to use.
+            Available methods:
+                - 'wizard' (default)
+                - 'leastsq'
+        options (dict, optional): additional options for fitting method.
+
+    Returns:
+        The fitted operator.
+
+    Available methods:
+        - 'wizard' (Default): The returned operator will be constrained to be
+                              positive-semidefinite.
+            Options:
+            - 'trace': the trace of the returned operator.
+                       The default value is 1.
+            - 'beta': hedging parameter for computing frequencies from
+                      zero-count data. The default value is 0.50922.
+            - 'epsilon: threshold for truncating small eigenvalues to zero.
+                        The default value is 0
+        - 'leastsq': Fitting without postive-semidefinite constraint.
+            Options:
+            - 'trace': Same as for 'wizard' method.
+            - 'beta': Same as for 'wizard' method.
+    """
+    if method is None:
+        method = 'wizard'  # set default method
+
+    if method in ['wizard', 'leastsq']:
+        # get options
+        trace = __get_option('trace', options)
+        beta = __get_option('beta', options)
+        # fit state
+        rho = __leastsq_fit(data, trace=trace, beta=beta)
+        if method == 'wizard':
+            # Use wizard method to constrain positivity
+            epsilon = __get_option('epsilon', options)
+            rho = __wizard(rho, epsilon=epsilon)
+        return rho
+    else:
+        print('error: method unknown reconstruction method "%s"' % method)
+
+
+def __get_option(opt, options):
+    """
+    Return an optional value or None if not found.
+    """
+    if options is not None:
+        if opt in options:
+            return options[opt]
+    return None
+
+
+###############################################################
+# Fit Method: Linear Inversion
 ###############################################################
 
 def __tomo_basis_matrix(meas_basis):
@@ -765,6 +582,10 @@ def __leastsq_fit(data, weights=None, trace=None, beta=None):
     return __tomo_linear_inv(freqs, ops, weights, trace=trace)
 
 
+###############################################################
+# Fit Method: Wizard
+###############################################################
+
 def __wizard(rho, epsilon=None):
     """
     Returns the nearest postitive semidefinite operator to an operator.
@@ -801,64 +622,198 @@ def __wizard(rho, epsilon=None):
     return rho_wizard
 
 
-def __get_option(opt, options):
-    """
-    Return an optional value or None if not found.
-    """
-    if options is not None:
-        if opt in options:
-            return options[opt]
-    return None
+###############################################################
+# DEPRECIATED TOMOGRAPHY API
+###############################################################
 
-
-def fit_tomography_data(data, method=None, options=None):
+def build_state_tomography_circuits(Q_program, name, qubits, qreg, creg,
+                                    meas_basis='pauli', silent=False):
     """
-    Reconstruct a density matrix or process-matrix from tomography data.
+    Add state tomography measurement circuits to a QuantumProgram.
 
-    If the input data is state_tomography_data the returned operator will
-    be a density matrix. If the input data is process_tomography_data the
-    returned operator will be a Choi-matrix in the column-vectorization
-    convention.
+    The quantum program must contain a circuit 'name', which is treated as a
+    state preparation circuit. This function then appends the circuit with a
+    tomographically overcomplete set of measurements in the Pauli basis for
+    each qubit to be measured. For n-qubit tomography this result in 3 ** n
+    measurement circuits being added to the quantum program.
 
     Args:
-        data (dict): process tomography measurement data.
-        method (str, optional): the fitting method to use.
-            Available methods:
-                - 'wizard' (default)
-                - 'leastsq'
-        options (dict, optional): additional options for fitting method.
+        Q_program (QuantumProgram): A quantum program to store the circuits.
+        name (string): The name of the base circuit to be appended.
+        qubits (list[int]): a list of the qubit indexes of qreg to be measured.
+        qreg (QuantumRegister): the quantum register containing qubits to be
+                                measured.
+        creg (ClassicalRegister): the classical register containing bits to
+                                  store measurement outcomes.
+        silent (bool, optional): hide verbose output.
 
     Returns:
-        The fitted operator.
-
-    Available methods:
-        - 'wizard' (Default): The returned operator will be constrained to be
-                              positive-semidefinite.
-            Options:
-            - 'trace': the trace of the returned operator.
-                       The default value is 1.
-            - 'beta': hedging parameter for computing frequencies from
-                      zero-count data. The default value is 0.50922.
-            - 'epsilon: threshold for truncating small eigenvalues to zero.
-                        The default value is 0
-        - 'leastsq': Fitting without postive-semidefinite constraint.
-            Options:
-            - 'trace': Same as for 'wizard' method.
-            - 'beta': Same as for 'wizard' method.
+        A list of names of the added quantum state tomography circuits.
+        Example: ['circ_measX0', 'circ_measY0', 'circ_measZ0']
     """
-    if method is None:
-        method = 'wizard'  # set default method
 
-    if method in ['wizard', 'leastsq']:
-        # get options
-        trace = __get_option('trace', options)
-        beta = __get_option('beta', options)
-        # fit state
-        rho = __leastsq_fit(data, trace=trace, beta=beta)
-        if method == 'wizard':
-            # Use wizard method to constrain positivity
-            epsilon = __get_option('epsilon', options)
-            rho = __wizard(rho, epsilon=epsilon)
-        return rho
-    else:
-        print('error: method unknown reconstruction method "%s"' % method)
+    tomoset = tomography_set(qubits, meas_basis)
+    print('WARNING: `build_state_tomography_circuits` is depreciated. ' +
+          'Use `tomography_set` and `create_tomography_circuits` instead')
+
+    return create_tomography_circuits(Q_program, name, qreg, creg, tomoset,
+                                      silent=silent)
+
+
+def build_process_tomography_circuits(Q_program, name, qubits, qreg, creg,
+                                      prep_basis='sic', meas_basis='pauli',
+                                      silent=False):
+    """
+    Add process tomography measurement circuits to a QuantumProgram.
+
+    The quantum program must contain a circuit 'name', which is the circuit
+    that will be reconstructed via tomographic measurements. This function
+    then prepends and appends the circuit with a tomographically overcomplete
+    set of preparations and measurements in the Pauli basis for
+    each qubit to be measured. For n-qubit process tomography this result in
+    (6 ** n) * (3 ** n) circuits being added to the quantum program:
+        - 3 ** n measurements in the Pauli X, Y, Z bases.
+        - 6 ** n preparations in the +1 and -1 eigenstates of X, Y, Z.
+
+    Args:
+        Q_program (QuantumProgram): A quantum program to store the circuits.
+        name (string): The name of the base circuit to be appended.
+        qubits (list[int]): a list of the qubit indexes of qreg to be measured.
+        qreg (QuantumRegister): the quantum register containing qubits to be
+                                measured.
+        creg (ClassicalRegister): the classical register containing bits to
+                                  store measurement outcomes.
+        silent (bool, optional): hide verbose output.
+
+    Returns:
+        A list of names of the added quantum process tomography circuits.
+        Example:
+        ['circ_prepXp0_measX0', 'circ_prepXp0_measY0', 'circ_prepXp0_measZ0',
+         'circ_prepXm0_measX0', 'circ_prepXm0_measY0', 'circ_prepXm0_measZ0',
+         'circ_prepYp0_measX0', 'circ_prepYp0_measY0', 'circ_prepYp0_measZ0',
+         'circ_prepYm0_measX0', 'circ_prepYm0_measY0', 'circ_prepYm0_measZ0',
+         'circ_prepZp0_measX0', 'circ_prepZp0_measY0', 'circ_prepZp0_measZ0',
+         'circ_prepZm0_measX0', 'circ_prepZm0_measY0', 'circ_prepZm0_measZ0']
+    """
+
+    print('WARNING: `build_process_tomography_circuits` is depreciated. ' +
+          'Use `tomography_set` and `create_tomography_circuits` instead')
+
+    tomoset = tomography_set(qubits, meas_basis, prep_basis)
+    return create_tomography_circuits(Q_program, name, qreg, creg, tomoset,
+                                      silent=silent)
+
+###############################################################
+# OLD Tomography circuit labels
+###############################################################
+
+def state_tomography_circuit_names(name, qubits, meas_basis='pauli'):
+    """
+    Return a list of state tomography circuit names.
+
+    This list is the same as that returned by the
+    build_state_tomography_circuits function.
+
+    Args:
+        name (string): the name of the original state preparation
+                       circuit.
+        qubits: (list[int]): the qubits being measured.
+
+    Returns:
+        A list of circuit names.
+    """
+    print('WARNING: `state_tomography_circuit_names` is depreciated. ' +
+          'Use `tomography_set` and `tomography_circuit_names` instead')
+    tomoset = tomography_set(qubits, meas_basis=meas_basis)
+    return tomography_circuit_names(tomoset, name)
+
+
+def process_tomography_circuit_names(name, qubits, prep_basis='sic',
+                                     meas_basis='pauli'):
+    """
+    Return a list of process tomography circuit names.
+
+    This list is the same as that returned by the
+    build_process_tomography_circuits function.
+
+    Args:
+        name (string): the name of the original circuit to be
+                       reconstructed.
+        qubits: (list[int]): the qubits being measured.
+
+    Returns:
+        A list of circuit names.
+    """
+    print('WARNING: `process_tomography_circuit_names` is depreciated.' +
+          'Use `tomography_set` and `tomography_circuit_names` instead')
+    tomoset = tomography_set(qubits, meas_basis=meas_basis,
+                             prep_basis=prep_basis)
+    return tomography_circuit_names(tomoset, name)
+
+
+###############################################################
+# OLD Getting outcome basis operators
+###############################################################
+
+def state_tomography_data(Q_result, name, meas_qubits, meas_basis='pauli'):
+    """
+    Return a list of state tomography measurement outcomes.
+
+    Args:
+        Q_result (Result): Results from execution of a state tomography
+            circuits on a backend.
+        name (string): The name of the base state preparation circuit.
+        meas_qubits (list[int]): a list of the qubit indexes measured.
+        meas_basis (basis dict, optional): the basis used for measurement. Default
+            is the Pauli basis.
+
+    Returns:
+        A list of dicts for the outcome of each state tomography
+        measurement circuit. The keys of the dictionary are
+        {
+            'counts': dict('str': int),
+                      <the marginal counts for measured qubits>,
+            'shots': int,
+                     <total number of shots for measurement circuit>
+            'meas_basis': dict('str': np.array)
+                          <the projector for the measurement outcomes>
+        }
+    """
+    print('WARNING: `state_tomography_data` is depreciated. ' +
+          'Use `tomography_set` and `tomography_data` instead')
+    tomoset = tomography_set(meas_qubits, meas_basis=meas_basis)
+    return tomography_data(Q_result, name, tomoset)
+
+
+def process_tomography_data(Q_result, name, meas_qubits, prep_basis='sic',
+                            meas_basis='pauli'):
+    """
+    Return a list of process tomography measurement outcomes.
+
+    Args:
+        Q_result (Result): Results from execution of a process tomography
+            circuits on a backend.
+        name (string): The name of the circuit being reconstructed.
+        meas_qubits (list[int]): a list of the qubit indexes measured.
+        basis (basis dict, optional): the basis used for measurement. Default
+            is the Pauli basis.
+
+    Returns:
+        A list of dicts for the outcome of each process tomography
+        measurement circuit. The keys of the dictionary are
+        {
+            'counts': dict('str': int),
+                      <the marginal counts for measured qubits>,
+            'shots': int,
+                     <total number of shots for measurement circuit>
+            'meas_basis': dict('str': np.array),
+                          <the projector for the measurement outcomes>
+            'prep_basis': np.array,
+                          <the projector for the prepared input state>
+        }
+    """
+    print('WARNING: `process_tomography_data` is depreciated. ' +
+          'Use `tomography_set` and `tomography_data` instead')
+    tomoset = tomography_set(meas_qubits, meas_basis=meas_basis,
+                             prep_basis=prep_basis)
+    return tomography_data(Q_result, name, tomoset)
